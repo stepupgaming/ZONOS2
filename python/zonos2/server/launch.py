@@ -13,6 +13,17 @@ if TYPE_CHECKING:
     from .args import ServerArgs
 
 
+def _configure_windows_event_loop_policy() -> None:
+    if sys.platform != "win32":
+        return
+
+    import asyncio
+
+    policy_cls = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+    if policy_cls is not None:
+        asyncio.set_event_loop_policy(policy_cls())
+
+
 def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
     import torch
 
@@ -45,6 +56,8 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
 
 
 def launch_server(run_shell: bool = False) -> None:
+    _configure_windows_event_loop_policy()
+
     from .api_server import run_api_server
     from .args import parse_args
 

@@ -1402,6 +1402,10 @@ app.add_middleware(
 )
 
 
+def windows_selector_loop_factory() -> asyncio.AbstractEventLoop:
+    return asyncio.SelectorEventLoop()
+
+
 @app.get("/")
 async def serve_ui():
     """Serve the TTS web UI."""
@@ -1985,6 +1989,15 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], None], run_sh
 
     logger.info(f"API server is ready to serve on {host}:{port}")
     if not run_shell:
-        uvicorn.run(app, host=host, port=port)
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            loop=(
+                "zonos2.server.api_server:windows_selector_loop_factory"
+                if os.name == "nt"
+                else "auto"
+            ),
+        )
     else:
         asyncio.run(tts_shell())
