@@ -200,6 +200,7 @@ class Engine:
             cuda_graph_max_bs=config.cuda_graph_max_bs,
             free_memory=init_free_memory,
             max_seq_len=self.max_seq_len,
+            cuda_graph_max_seq_len=config.cuda_graph_max_seq_len,
             vocab_size=self.model_config.codebook_size + 2,
             dummy_req=self.dummy_req,
             disable_cuda_graphs=config.disable_cuda_graphs,

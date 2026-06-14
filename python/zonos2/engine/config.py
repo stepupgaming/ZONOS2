@@ -23,6 +23,7 @@ class EngineConfig:
     moe_backend: str = "fused_moe"
     cuda_graph_bs: List[int] | None = None
     cuda_graph_max_bs: int | None = None
+    cuda_graph_max_seq_len: int | None = None
     disable_cuda_graphs: bool = sys.platform == "win32"
     page_size: int = 1
     memory_ratio: float = 0.9

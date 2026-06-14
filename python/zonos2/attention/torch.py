@@ -199,9 +199,11 @@ class TorchAttentionBackend(BaseAttnBackend):
         capture.input_ids[:bs].copy_(batch.input_ids)
         capture.out_loc[:bs].copy_(batch.out_loc)
         capture.positions[:bs].copy_(metadata.positions)
-        capture.seq_lens[:bs].copy_(metadata.seq_lens)
+        capture.seq_lens[:bs].copy_(metadata.seq_lens.clamp(max=capture.page_table.shape[1]))
         page_table_width = metadata.page_table.size(1)
-        capture.page_table[:bs, :page_table_width].copy_(metadata.page_table)
+        capture_width = capture.page_table.shape[1]
+        copy_width = min(page_table_width, capture_width)
+        capture.page_table[:bs, :copy_width].copy_(metadata.page_table[:, -copy_width:])
         capture.cu_seqlens_q[: bs + 1].copy_(metadata.cu_seqlens_q)
 
         metadata.positions = capture.positions[:bs]

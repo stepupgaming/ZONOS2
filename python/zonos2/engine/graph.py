@@ -56,6 +56,7 @@ class GraphRunner:
         cuda_graph_max_bs: int | None,
         free_memory: int,
         max_seq_len: int,
+        cuda_graph_max_seq_len: int | None,
         vocab_size: int,
         dummy_req: TTSReq,
         disable_cuda_graphs: bool = False,
@@ -74,7 +75,12 @@ class GraphRunner:
         self.dummy_req = dummy_req
         self.stream = stream
         self.device = device
-        self.graph_map = self._capture_graphs(max_seq_len, vocab_size, model)
+        if cuda_graph_max_seq_len is not None:
+            if cuda_graph_max_seq_len < 1:
+                raise ValueError("cuda_graph_max_seq_len must be positive.")
+            max_seq_len = min(max_seq_len, cuda_graph_max_seq_len)
+        self.max_seq_len = max_seq_len
+        self.graph_map = self._capture_graphs(self.max_seq_len, vocab_size, model)
 
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: Zonos2ForCausalLM):
         graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
@@ -96,7 +102,10 @@ class GraphRunner:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
 
-        logger.info_rank0(f"Start capturing CUDA graphs with sizes: {self.graph_bs_list}")
+        logger.info_rank0(
+            f"Start capturing CUDA graphs with sizes: {self.graph_bs_list}, "
+            f"attention window: {max_seq_len}"
+        )
         free_memory = get_free_memory(self.device)
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
 

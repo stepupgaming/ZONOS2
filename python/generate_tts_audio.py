@@ -211,6 +211,15 @@ def parse_args() -> argparse.Namespace:
         help="Skip audio decoding and only output audio tokens (no WAV file)",
     )
     parser.add_argument(
+        "--eos-decode-tail-frames",
+        type=int,
+        default=None,
+        help=(
+            "Frames to keep after aligned EOS when decoding delayed codebooks "
+            "(default: n_codebooks - 1)."
+        ),
+    )
+    parser.add_argument(
         "--top_p",
         type=float,
         default=0.0,
@@ -256,6 +265,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Maximum batch size for automatic CUDA graph capture (default: 1).",
+    )
+    parser.add_argument(
+        "--cuda-graph-max-seq-len",
+        type=int,
+        default=None,
+        help=(
+            "Maximum attention window captured inside CUDA graphs. "
+            "Smaller values reduce decode work for long single-speaker runs."
+        ),
     )
     parser.add_argument(
         "--speaker-audio",
@@ -362,6 +380,7 @@ def main() -> None:
         "disable_cuda_graphs": not args.enable_cuda_graphs,
         "cuda_graph_bs": cuda_graph_bs,
         "cuda_graph_max_bs": args.cuda_graph_max_bs,
+        "cuda_graph_max_seq_len": args.cuda_graph_max_seq_len,
     }
     if args.use_dummy_weight:
         llm_kwargs["use_dummy_weight"] = True
@@ -373,6 +392,7 @@ def main() -> None:
         tts = TTSLLM(
             model_path=args.model_path,
             decode_audio=not args.no_vocoder,
+            eos_decode_tail_frames=args.eos_decode_tail_frames,
             **llm_kwargs,
         )
     except Exception as e:

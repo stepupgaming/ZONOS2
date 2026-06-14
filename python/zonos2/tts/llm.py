@@ -76,6 +76,7 @@ class TTSLLM(TTSScheduler):
         eoa_id: int | None = None,
         audio_pad_id: int | None = None,
         decode_audio: bool = True,
+        eos_decode_tail_frames: int | None = None,
         **kwargs,
     ):
         """Initialize TTSLLM.
@@ -113,6 +114,11 @@ class TTSLLM(TTSScheduler):
             self.text_vocab = text_vocab
 
         self.decode_audio = decode_audio
+        self.eos_decode_tail_frames = (
+            max(0, int(eos_decode_tail_frames))
+            if eos_decode_tail_frames is not None
+            else max(0, self.n_codebooks - 1)
+        )
 
         # Request tracking
         self.pending_requests: List[
@@ -332,11 +338,19 @@ class TTSLLM(TTSScheduler):
             audio_bytes = None
             if should_decode and audio_tokens and self._vocoder:
                 # Convert to tensor, align delayed codebooks, then drop EOS and
-                # post-EOS frames before DAC decode.
+                # most post-EOS frames before DAC decode. The short tail keeps
+                # delayed codebooks from clipping the final phoneme.
                 codes = torch.tensor(audio_tokens, dtype=torch.int64, device="cuda")
                 codes = shear_up(codes, self.audio_pad_id)
                 if status.eos_frame is not None:
-                    codes = codes[: max(0, status.eos_frame)]
+                    decode_end = max(
+                        0,
+                        min(
+                            codes.shape[0],
+                            status.eos_frame + self.eos_decode_tail_frames,
+                        ),
+                    )
+                    codes = codes[:decode_end]
                 if codes.numel() == 0:
                     results.append(
                         {
