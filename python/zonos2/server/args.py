@@ -39,13 +39,19 @@ class ServerArgs(SchedulerConfig):
 
     @property
     def zmq_frontend_addr(self) -> str:
+        if os.name == "nt":
+            return f"tcp://127.0.0.1:{self.server_port + 4}"
         return "ipc:///tmp/zonos2_3" + self._unique_suffix
 
     @property
     def zmq_tokenizer_addr(self) -> str:
         if self.share_tokenizer:
             return self.zmq_detokenizer_addr
-        result = "ipc:///tmp/zonos2_4" + self._unique_suffix
+        result = (
+            f"tcp://127.0.0.1:{self.server_port + 5}"
+            if os.name == "nt"
+            else "ipc:///tmp/zonos2_4" + self._unique_suffix
+        )
         assert result != self.zmq_detokenizer_addr
         return result
 
@@ -64,6 +70,24 @@ class ServerArgs(SchedulerConfig):
     @property
     def distributed_addr(self) -> str:
         return f"tcp://127.0.0.1:{self.server_port + 1}"
+
+    @property
+    def zmq_backend_addr(self) -> str:
+        if os.name == "nt":
+            return f"tcp://127.0.0.1:{self.server_port + 2}"
+        return super().zmq_backend_addr
+
+    @property
+    def zmq_detokenizer_addr(self) -> str:
+        if os.name == "nt":
+            return f"tcp://127.0.0.1:{self.server_port + 3}"
+        return super().zmq_detokenizer_addr
+
+    @property
+    def zmq_scheduler_broadcast_addr(self) -> str:
+        if os.name == "nt":
+            return f"tcp://127.0.0.1:{self.server_port + 6}"
+        return super().zmq_scheduler_broadcast_addr
 
 
 def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bool]:
@@ -144,11 +168,11 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         help="Use dummy weights for testing.",
     )
 
-    assert ServerArgs.use_pynccl == True
     parser.add_argument(
         "--disable-pynccl",
         action="store_false",
         dest="use_pynccl",
+        default=ServerArgs.use_pynccl,
         help="Disable PyNCCL for tensor parallelism.",
     )
 
@@ -174,6 +198,19 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
         type=int,
         default=ServerArgs.cuda_graph_max_bs,
         help="The maximum batch size for CUDA graph capture. None means auto-tuning based on the GPU memory.",
+    )
+    parser.add_argument(
+        "--enable-cuda-graphs",
+        action="store_false",
+        dest="disable_cuda_graphs",
+        default=ServerArgs.disable_cuda_graphs,
+        help="Enable full-context CUDA graph capture for decode.",
+    )
+    parser.add_argument(
+        "--disable-cuda-graphs",
+        action="store_true",
+        dest="disable_cuda_graphs",
+        help="Disable CUDA graph capture for decode.",
     )
 
     parser.add_argument(
