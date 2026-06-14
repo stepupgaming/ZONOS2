@@ -95,26 +95,24 @@ def _fused_experts_impl_torch(
     topk_weights_flat = topk_weights.to(compute_dtype).reshape(-1)
 
     if hidden_states.is_cuda and torch.cuda.is_current_stream_capturing():
-        out_flat = torch.zeros(
-            (num_tokens * top_k, w2.shape[1]),
-            device=hidden_states.device,
-            dtype=compute_dtype,
-        )
-        for expert_id in range(E):
-            gate_up = torch.matmul(hidden_states_flat, w1[expert_id].to(compute_dtype).t())
-            gate = gate_up[:, :intermediate_size]
-            up = gate_up[:, intermediate_size:]
+        selected_w1 = w1[topk_ids_flat.long()].to(compute_dtype)
+        selected_w2 = w2[topk_ids_flat.long()].to(compute_dtype)
 
-            if activation == "silu":
-                activated = up * F.silu(gate)
-            elif activation == "gelu":
-                activated = up * F.gelu(gate)
-            else:
-                raise ValueError(f"Unsupported activation: {activation=}")
+        gate_up = torch.bmm(
+            selected_w1,
+            hidden_states_flat.to(compute_dtype).unsqueeze(-1),
+        ).squeeze(-1)
+        gate = gate_up[:, :intermediate_size]
+        up = gate_up[:, intermediate_size:]
 
-            expert_out = torch.matmul(activated, w2[expert_id].to(compute_dtype).t())
-            mask = (topk_ids_flat == expert_id).to(compute_dtype).unsqueeze(-1)
-            out_flat = out_flat + expert_out * mask
+        if activation == "silu":
+            activated = up * F.silu(gate)
+        elif activation == "gelu":
+            activated = up * F.gelu(gate)
+        else:
+            raise ValueError(f"Unsupported activation: {activation=}")
+
+        out_flat = torch.bmm(selected_w2, activated.unsqueeze(-1)).squeeze(-1)
 
         weights = topk_weights_flat.unsqueeze(-1)
         if apply_router_weight_on_input:
