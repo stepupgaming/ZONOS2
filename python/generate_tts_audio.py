@@ -271,8 +271,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "Maximum attention window captured inside CUDA graphs. "
-            "Smaller values reduce decode work for long single-speaker runs."
+            "Experimental maximum attention window captured inside CUDA graphs. "
+            "Smaller values can reduce decode work but may break speech coherence."
+        ),
+    )
+    parser.add_argument(
+        "--allow-experimental-windowed-attention",
+        action="store_true",
+        help=(
+            "Allow --cuda-graph-max-seq-len to be smaller than the full engine "
+            "sequence length. This is a speed experiment and can reduce quality."
         ),
     )
     parser.add_argument(
@@ -372,6 +380,15 @@ def main() -> None:
         sys.exit(1)
     if any(bs <= 0 for bs in cuda_graph_bs):
         print("[ERROR] --cuda-graph-bs values must be positive integers.")
+        sys.exit(1)
+    if (
+        args.cuda_graph_max_seq_len is not None
+        and args.cuda_graph_max_seq_len < args.num_pages
+        and not args.allow_experimental_windowed_attention
+    ):
+        print("[ERROR] --cuda-graph-max-seq-len smaller than --num-pages is experimental.")
+        print("        It can make speech incoherent by dropping prompt/text attention context.")
+        print("        Remove it for quality, or add --allow-experimental-windowed-attention for benchmarking.")
         sys.exit(1)
 
     llm_kwargs: dict = {
