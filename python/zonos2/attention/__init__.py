@@ -47,6 +47,13 @@ def create_fa_backend(config: ModelConfig, kvcache: BaseKVCache, page_table: tor
     return FlashAttentionBackend(config, kvcache, page_table)
 
 
+@SUPPORTED_ATTENTION_BACKENDS.register("torch")
+def create_torch_backend(config: ModelConfig, kvcache: BaseKVCache, page_table: torch.Tensor):
+    from .torch import TorchAttentionBackend
+
+    return TorchAttentionBackend(config, kvcache, page_table)
+
+
 def validate_backend(backend: str):
     if backend != "auto":
         required_backends = backend.split(",") if "," in backend else [backend]

@@ -25,6 +25,19 @@ from .graph import GraphRunner, get_free_memory, mem_GB
 logger = init_logger(__name__)
 
 
+class _NoopWork:
+    def wait(self):
+        return None
+
+
+class _SingleProcessCPUGroup:
+    def barrier(self):
+        return _NoopWork()
+
+    def broadcast(self, tensor, root: int = 0):
+        return _NoopWork()
+
+
 def create_page_table(shape: Tuple[int, int], device: torch.device) -> torch.Tensor:
     return torch.zeros(shape, dtype=torch.int32, device=device)
 
@@ -46,6 +59,7 @@ def _get_frame_width(model_config) -> int:
 
 class Engine:
     def __init__(self, config: EngineConfig):
+        self.config = config
         self.model_config = config.model_config
         set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
 
@@ -188,16 +202,36 @@ class Engine:
             max_seq_len=self.max_seq_len,
             vocab_size=self.model_config.codebook_size + 2,
             dummy_req=self.dummy_req,
+            disable_cuda_graphs=config.disable_cuda_graphs,
         )
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
+        import os
+        import sys
+
+        if config.tp_info.size == 1 and sys.platform == "win32":
+            return _SingleProcessCPUGroup()
+
+        addr = config.distributed_addr.replace("tcp://", "")
+        if ":" in addr:
+            master_addr, master_port = addr.split(":", 1)
+            os.environ.setdefault("MASTER_ADDR", master_addr)
+            os.environ.setdefault("MASTER_PORT", master_port)
+        if sys.platform == "win32":
+            # On Windows, file-based init is more reliable than TCP for single-process.
+            if config.tp_info.size == 1:
+                init_method = f"file://{os.path.expanduser('~')}/.cache/zonos2_dist_{master_port}"
+            else:
+                init_method = config.distributed_addr
+        else:
+            init_method = config.distributed_addr
         if config.tp_info.size == 1 or config.use_pynccl:
             torch.distributed.init_process_group(
                 backend="gloo",
                 rank=config.tp_info.rank,
                 world_size=config.tp_info.size,
                 timeout=timedelta(seconds=config.distributed_timeout),
-                init_method=config.distributed_addr,
+                init_method=init_method,
             )
             tp_cpu_group = torch.distributed.group.WORLD
             assert tp_cpu_group is not None
@@ -278,6 +312,8 @@ class Engine:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
         free_memory = get_free_memory(self.device)
+        if self.config.tp_info.size == 1:
+            return free_memory, free_memory
         free_mem_tensor = torch.tensor([free_memory, -free_memory], device="cpu", dtype=torch.int64)
         torch.distributed.all_reduce(
             free_mem_tensor, op=torch.distributed.ReduceOp.MIN, group=self.tp_cpu_group
@@ -331,5 +367,6 @@ class Engine:
 
     def shutdown(self) -> None:
         self.graph_runner.destroy_cuda_graphs()
-        torch.distributed.destroy_process_group()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
         destroy_distributed()

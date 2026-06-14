@@ -2,12 +2,36 @@ import functools
 from typing import Dict, Optional, Tuple
 
 import torch
-import triton
-import triton.language as tl
-from sgl_kernel import gelu_and_mul, silu_and_mul
-from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
-from zonos2.kernel.moe_impl import fused_moe_kernel_triton
-from zonos2.kernel.triton.fused_moe import moe_sum_reduce_triton
+
+# Try to import triton and sgl_kernel; fall back to CPU-only path if unavailable (e.g., Windows).
+try:
+    import triton
+    import triton.language as tl
+    _TRITON_AVAILABLE = True
+except ImportError:
+    triton = None
+    tl = None
+    _TRITON_AVAILABLE = False
+
+try:
+    from sgl_kernel import gelu_and_mul, silu_and_mul
+    from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
+    _SGL_KERNEL_AVAILABLE = True
+except ImportError:
+    gelu_and_mul = None
+    silu_and_mul = None
+    sgl_moe_align_block_size = None
+    _SGL_KERNEL_AVAILABLE = False
+
+try:
+    from zonos2.kernel.moe_impl import fused_moe_kernel_triton
+    from zonos2.kernel.triton.fused_moe import moe_sum_reduce_triton
+    _TRITON_KERNEL_AVAILABLE = True
+except ImportError:
+    fused_moe_kernel_triton = None
+    moe_sum_reduce_triton = None
+    _TRITON_KERNEL_AVAILABLE = False
+
 from zonos2.layers.moe.fused_moe.topk import select_experts
 
 
@@ -25,46 +49,171 @@ def is_cuda():
     return torch.cuda.is_available() and torch.version.cuda
 
 
+def _ensure_cuda_libs():
+    if not _TRITON_AVAILABLE or not _TRITON_KERNEL_AVAILABLE:
+        raise RuntimeError(
+            "Triton is required for the fused MoE expert path on this platform."
+        )
+
+
+def _fused_experts_impl_torch(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool = False,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    no_combine: bool = False,
+    routed_scaling_factor: Optional[float] = None,
+):
+    """Pure PyTorch fallback for fused_experts_impl (no Triton/sgl_kernel)."""
+    import torch.nn.functional as F
+
+    num_tokens, hidden_size = hidden_states.shape
+    top_k = topk_ids.shape[1]
+    E, N, _ = w1.shape
+    intermediate_size = N // 2
+
+    out_dtype = hidden_states.dtype
+    compute_dtype = torch.float32
+
+    if no_combine:
+        out = torch.zeros(
+            (num_tokens, top_k, w2.shape[1]),
+            device=hidden_states.device,
+            dtype=compute_dtype,
+        )
+    else:
+        out = torch.zeros_like(hidden_states, dtype=compute_dtype)
+
+    # Flatten to (num_tokens * top_k, hidden_size)
+    hidden_states_expanded = hidden_states.to(compute_dtype).unsqueeze(1).expand(-1, top_k, -1)
+    hidden_states_flat = hidden_states_expanded.reshape(-1, hidden_size)
+    topk_ids_flat = topk_ids.reshape(-1)
+    topk_weights_flat = topk_weights.to(compute_dtype).reshape(-1)
+
+    if hidden_states.is_cuda and torch.cuda.is_current_stream_capturing():
+        out_flat = torch.zeros(
+            (num_tokens * top_k, w2.shape[1]),
+            device=hidden_states.device,
+            dtype=compute_dtype,
+        )
+        for expert_id in range(E):
+            gate_up = torch.matmul(hidden_states_flat, w1[expert_id].to(compute_dtype).t())
+            gate = gate_up[:, :intermediate_size]
+            up = gate_up[:, intermediate_size:]
+
+            if activation == "silu":
+                activated = up * F.silu(gate)
+            elif activation == "gelu":
+                activated = up * F.gelu(gate)
+            else:
+                raise ValueError(f"Unsupported activation: {activation=}")
+
+            expert_out = torch.matmul(activated, w2[expert_id].to(compute_dtype).t())
+            mask = (topk_ids_flat == expert_id).to(compute_dtype).unsqueeze(-1)
+            out_flat = out_flat + expert_out * mask
+
+        weights = topk_weights_flat.unsqueeze(-1)
+        if apply_router_weight_on_input:
+            out_flat = out_flat * weights
+
+        if no_combine:
+            return out_flat.view(num_tokens, top_k, w2.shape[1]).to(out_dtype)
+
+        out = (out_flat.view(num_tokens, top_k, w2.shape[1]) * weights.view(num_tokens, top_k, 1)).sum(dim=1)
+        if routed_scaling_factor is not None:
+            out.mul_(routed_scaling_factor)
+        return out.to(out_dtype)
+
+    # For each expert, gather tokens and batch-process
+    for expert_id in range(E):
+        mask = topk_ids_flat == expert_id
+        if not mask.any():
+            continue
+        expert_hidden = hidden_states_flat[mask]
+        expert_weights = topk_weights_flat[mask]
+
+        # gate_up_proj: (2*intermediate, H)
+        gate_up = torch.matmul(expert_hidden, w1[expert_id].to(compute_dtype).t())
+        gate = gate_up[:, :intermediate_size]
+        up = gate_up[:, intermediate_size:]
+
+        if activation == "silu":
+            activated = up * F.silu(gate)
+        elif activation == "gelu":
+            activated = up * F.gelu(gate)
+        else:
+            raise ValueError(f"Unsupported activation: {activation=}")
+
+        expert_out = torch.matmul(activated, w2[expert_id].to(compute_dtype).t())
+
+        if apply_router_weight_on_input:
+            expert_out = expert_out * expert_weights.unsqueeze(-1)
+
+        # Scatter back
+        token_indices = torch.arange(num_tokens * top_k, device=hidden_states.device)[mask]
+        token_idx = token_indices // top_k
+        k_idx = token_indices % top_k
+
+        if no_combine:
+            out[token_idx, k_idx] = expert_out
+        else:
+            out[token_idx] += expert_out * expert_weights.unsqueeze(-1)
+
+    if not no_combine and routed_scaling_factor is not None:
+        out.mul_(routed_scaling_factor)
+
+    return out.to(out_dtype)
+
+
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
-
-    Parameters:
-    - topk_ids: A tensor of shape [total_tokens, top_k] representing the
-        top-k expert indices for each token.
-    - block_size: The block size used in block matrix multiplication.
-    - num_experts: The total number of experts.
-
-    Returns:
-    - sorted_token_ids: A tensor containing the sorted token indices according
-        to their allocated expert.
-    - expert_ids: A tensor indicating the assigned expert index for each block.
-    - num_tokens_post_padded: The total number of tokens after padding,
-        ensuring divisibility by block_size.
-
-    This function pads the number of tokens that each expert needs to process
-    so that it is divisible by block_size.
-    Padding ensures that during block matrix multiplication, the dimensions
-    align correctly.
-
-    Example:
-    Given topk_ids = [[2, 3, 4], [1, 2, 4], [1, 3, 4], [1, 2, 3]],
-    block_size = 4, and num_experts = 4:
-    - We initially have 12 tokens (after repeating 'top_k' times) and 4 experts,
-        with each expert needing to process 3 tokens.
-    - As block_size is 4, we pad 1 token for each expert.
-    - First, flatten topk_ids to [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3].
-    - Then append padding tokens [12, 12, 12, 12] for each block.
-    - After sorting by expert index, we obtain token_ids
-        [3, 6, 9, 12, 0, 4, 10, 12, 1, 7, 11, 12, 2, 5, 8, 12].
-        Tokens 12 are non-existent (padding) and are ignored in
-        the subsequent matrix multiplication.
-    - The padding ensures that the total number of tokens is now divisible
-        by block_size for proper block matrix operations.
     """
+    _ensure_cuda_libs()
+    if not _SGL_KERNEL_AVAILABLE:
+        flat = topk_ids.reshape(-1).to(torch.int32)
+        total = flat.numel()
+        per_expert = []
+        for expert_id in range(num_experts):
+            ids = torch.nonzero(flat == expert_id, as_tuple=False).flatten().to(torch.int32)
+            pad = (-ids.numel()) % block_size
+            if pad:
+                ids = torch.cat(
+                    [
+                        ids,
+                        torch.full((pad,), total, dtype=torch.int32, device=topk_ids.device),
+                    ]
+                )
+            per_expert.append(ids)
+
+        sorted_ids = torch.cat(per_expert) if per_expert else torch.empty(0, dtype=torch.int32, device=topk_ids.device)
+        if sorted_ids.numel() == 0:
+            sorted_ids = torch.full((block_size,), total, dtype=torch.int32, device=topk_ids.device)
+
+        block_expert_ids = []
+        for expert_id, ids in enumerate(per_expert):
+            blocks = ids.numel() // block_size
+            if blocks:
+                block_expert_ids.append(
+                    torch.full((blocks,), expert_id, dtype=torch.int32, device=topk_ids.device)
+                )
+        expert_ids = (
+            torch.cat(block_expert_ids)
+            if block_expert_ids
+            else torch.empty(0, dtype=torch.int32, device=topk_ids.device)
+        )
+        num_tokens_post_padded = torch.tensor(
+            [sorted_ids.numel()], dtype=torch.int32, device=topk_ids.device
+        )
+        return sorted_ids, expert_ids, num_tokens_post_padded
+
     max_num_tokens_padded = topk_ids.numel() + (num_experts + 1) * (block_size - 1)
     sorted_ids = torch.empty((max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device)
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
@@ -137,6 +286,24 @@ def fused_experts_impl(
     no_combine: bool = False,
     routed_scaling_factor: Optional[float] = None,
 ):
+    if (
+        not _TRITON_AVAILABLE
+        or not _TRITON_KERNEL_AVAILABLE
+        or not _SGL_KERNEL_AVAILABLE
+        or (not _SGL_KERNEL_AVAILABLE and topk_ids.shape[1] != 1)
+    ):
+        return _fused_experts_impl_torch(
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            inplace,
+            activation,
+            apply_router_weight_on_input,
+            no_combine,
+            routed_scaling_factor,
+        )
 
     padded_size = 0
     assert hidden_states.shape[1] == w1.shape[2] - padded_size, "Hidden size mismatch"
@@ -201,10 +368,6 @@ def fused_experts_impl(
             break
 
         if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
-            # Adjust the intermediate cache size and config for the last
-            # chunk. Note that in most cases we only have one chunk
-            # so the cache size and config are already set correctly and
-            # do not need to be adjusted.
             intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
             intermediate_cache2 = intermediate_cache2[: tokens_in_chunk * topk_ids.shape[1]]
             intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
@@ -233,13 +396,19 @@ def fused_experts_impl(
         )
 
         if activation == "silu":
-
-            silu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
-
+            if silu_and_mul is not None:
+                silu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
+            else:
+                gate = intermediate_cache1.view(-1, N)[:, : N // 2]
+                up = intermediate_cache1.view(-1, N)[:, N // 2 :]
+                torch.mul(torch.nn.functional.silu(gate), up, out=intermediate_cache2)
         elif activation == "gelu":
-
-            gelu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
-
+            if gelu_and_mul is not None:
+                gelu_and_mul(intermediate_cache1.view(-1, N), intermediate_cache2)
+            else:
+                gate = intermediate_cache1.view(-1, N)[:, : N // 2]
+                up = intermediate_cache1.view(-1, N)[:, N // 2 :]
+                torch.mul(torch.nn.functional.gelu(gate), up, out=intermediate_cache2)
         else:
             raise ValueError(f"Unsupported activation: {activation=}")
 
@@ -277,20 +446,26 @@ def fused_experts_impl(
                 out=out_hidden_states[begin_chunk_idx:end_chunk_idx],
             ).squeeze(dim=1)
         else:
-            # According to micro benchmark results, torch.compile can get better performance for small token.
             if tokens_in_chunk <= 32:
-
                 moe_sum_reduce_torch_compile(
                     intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx],
                     routed_scaling_factor,
                 )
             else:
-                moe_sum_reduce_triton(
-                    intermediate_cache3,
-                    out_hidden_states[begin_chunk_idx:end_chunk_idx],
-                    routed_scaling_factor,
-                )
+                if moe_sum_reduce_triton is not None:
+                    moe_sum_reduce_triton(
+                        intermediate_cache3,
+                        out_hidden_states[begin_chunk_idx:end_chunk_idx],
+                        routed_scaling_factor,
+                    )
+                else:
+                    torch.sum(
+                        intermediate_cache3,
+                        dim=1,
+                        out=out_hidden_states[begin_chunk_idx:end_chunk_idx],
+                    )
+                    out_hidden_states[begin_chunk_idx:end_chunk_idx].mul_(routed_scaling_factor)
     return out_hidden_states
 
 
@@ -305,7 +480,7 @@ def inplace_fused_experts(
     routed_scaling_factor: Optional[float] = None,
 ) -> None:
 
-    fused_experts_impl(
+    result = fused_experts_impl(
         hidden_states,
         w1,
         w2,
@@ -317,6 +492,8 @@ def inplace_fused_experts(
         False,
         routed_scaling_factor,
     )
+    if result is not hidden_states:
+        hidden_states.copy_(result)
 
 
 def outplace_fused_experts(

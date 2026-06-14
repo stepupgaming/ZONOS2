@@ -17,6 +17,7 @@ class TTSSamplingParams:
     top_p: float = 0.0
     min_p: float = 0.18
     max_tokens: int = 1024
+    min_tokens: int = 64
     ignore_eos: bool = False
     repetition_window: int = 50
     repetition_penalty: float = 1.2

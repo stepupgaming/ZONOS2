@@ -4,10 +4,25 @@ import torch
 
 try:
     from sgl_kernel import topk_softmax
+    _SGL_KERNEL_AVAILABLE = True
 except ImportError:
+    _SGL_KERNEL_AVAILABLE = False
 
     def topk_softmax(*args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("sgl_kernel not found.")
+
+
+def _topk_softmax_torch(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+) -> None:
+    """PyTorch fallback for sgl_kernel.topk_softmax."""
+    probs = torch.softmax(gating_output, dim=-1)
+    weights, ids = torch.topk(probs, topk_ids.shape[1], dim=-1)
+    topk_weights.copy_(weights)
+    topk_ids.copy_(ids.to(torch.int32))
 
 
 def fused_topk(
@@ -24,12 +39,20 @@ def fused_topk(
     topk_weights = torch.empty(M, topk, dtype=torch.float32, device=hidden_states.device)
     topk_ids = torch.empty(M, topk, dtype=torch.int32, device=hidden_states.device)
 
-    topk_softmax(
-        topk_weights,
-        topk_ids,
-        gating_output.float(),
-        renormalize,
-    )
+    if _SGL_KERNEL_AVAILABLE:
+        topk_softmax(
+            topk_weights,
+            topk_ids,
+            gating_output.float(),
+            renormalize,
+        )
+    else:
+        _topk_softmax_torch(
+            topk_weights,
+            topk_ids,
+            gating_output.float(),
+            renormalize,
+        )
 
     return _fused_topk_postprocess(
         topk_weights=topk_weights,

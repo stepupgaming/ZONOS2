@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import threading
 from typing import Dict, Optional
 
@@ -67,6 +68,8 @@ def default_cache_root() -> str:
 
 
 def normalization_enabled() -> bool:
+    if sys.platform == "win32":
+        return os.environ.get("ZONOS2_TTS_NORM", "0") != "0"
     return os.environ.get("ZONOS2_TTS_NORM", "1") != "0"
 
 

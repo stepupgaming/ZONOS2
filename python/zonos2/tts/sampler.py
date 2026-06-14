@@ -107,6 +107,8 @@ def sample_tts(
     top_ks: torch.Tensor,
     top_ps: torch.Tensor,
     min_ps: torch.Tensor,
+    min_tokens: torch.Tensor | None = None,
+    generation_steps: torch.Tensor | None = None,
     repetition_token_ids: torch.Tensor | None = None,
     repetition_penalties: torch.Tensor | None = None,
     text_vocab: int = 0,
@@ -129,6 +131,23 @@ def sample_tts(
     """
     global _debug_sample_count
     B, C, V = logits.shape
+
+    if (
+        min_tokens is not None
+        and generation_steps is not None
+        and EOA_TOKEN < V
+        and bool((min_tokens > 0).any())
+    ):
+        codebook_offsets = torch.arange(C, device=logits.device, dtype=generation_steps.dtype)
+        aligned_frames = generation_steps.view(B, 1) - codebook_offsets.view(1, C)
+        early_eoa = aligned_frames < min_tokens.view(B, 1)
+        if bool(early_eoa.any()):
+            logits = logits.clone()
+            logits[..., EOA_TOKEN] = torch.where(
+                early_eoa,
+                torch.full_like(logits[..., EOA_TOKEN], float("-inf")),
+                logits[..., EOA_TOKEN],
+            )
 
     # Debug: print detailed stats matching reference format for first 10 samples
     # Guard with is_current_stream_capturing to avoid CUDA graph capture errors

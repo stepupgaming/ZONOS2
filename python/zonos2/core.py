@@ -60,6 +60,7 @@ class TTSSamplingParams:
     top_p: float = 0.0
     min_p: float = 0.18
     max_tokens: int = 1024
+    min_tokens: int = 64
     ignore_eos: bool = False
     repetition_window: int = 50
     repetition_penalty: float = 1.2
@@ -156,17 +157,18 @@ class TTSReq:
         if self.sampling_params.ignore_eos:
             return False
 
-        # Match Zonos2 reference inference: any sampled EOA codebook starts the
-        # delayed stop countdown. The aligned frame is shifted back by the
-        # highest EOA codebook index and clamped at zero.
+        min_tokens = max(0, int(getattr(self.sampling_params, "min_tokens", 0)))
+
         # Use total_generated because this request only sees one decode frame at a time.
         if self.eos_frame < 0:
             step = self.total_generated - 1
-            eos_cols = [c == self.eoa_id for c in audio_codes[: self.n_codebooks]]
-            if any(eos_cols):
-                # First EOS: compute aligned frame
-                max_eos_cb = max(i for i, is_eos in enumerate(eos_cols) if is_eos)
-                self.eos_frame = max(0, step - max_eos_cb)
+            eos_frames = [
+                step - i
+                for i, c in enumerate(audio_codes[: self.n_codebooks])
+                if c == self.eoa_id and step - i >= min_tokens
+            ]
+            if eos_frames:
+                self.eos_frame = min(eos_frames)
                 self.eos_countdown = self.n_codebooks + 1
 
         # Decrement countdown

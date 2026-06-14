@@ -115,7 +115,9 @@ class TTSLLM(TTSScheduler):
         self.decode_audio = decode_audio
 
         # Request tracking
-        self.pending_requests: List[Tuple[torch.Tensor, TTSSamplingParams]] = []
+        self.pending_requests: List[
+            Tuple[torch.Tensor, TTSSamplingParams, torch.Tensor | None, bool, bool]
+        ] = []
         self.status_map: Dict[int, TTSRequestStatus] = {}
         self.counter = 0
 
@@ -193,7 +195,13 @@ class TTSLLM(TTSScheduler):
         results: List[BaseTTSBackendMsg] = []
         added, sum_input_len = 0, 0
 
-        for i, (input_ids, sampling_params) in enumerate(self.pending_requests):
+        for i, (
+            input_ids,
+            sampling_params,
+            speaker_embedding,
+            clean_speaker_background,
+            accurate_mode,
+        ) in enumerate(self.pending_requests):
             if sum_input_len >= self.prefill_budget:
                 break
 
@@ -207,6 +215,9 @@ class TTSLLM(TTSScheduler):
                     uid=uid,
                     input_ids=input_ids,
                     sampling_params=sampling_params,
+                    speaker_embedding=speaker_embedding,
+                    clean_speaker_background=clean_speaker_background,
+                    accurate_mode=accurate_mode,
                 )
             )
 
@@ -239,6 +250,9 @@ class TTSLLM(TTSScheduler):
         decode_audio: bool | None = None,
         speaking_rate_bucket: int | List[int | None] | None = None,
         quality_buckets: Dict[str, int | None] | List[int | None] | None = None,
+        speaker_embedding: torch.Tensor | List[torch.Tensor | None] | None = None,
+        clean_speaker_background: bool | List[bool] = False,
+        accurate_mode: bool | List[bool] = True,
     ) -> List[Dict]:
         """Generate audio tokens for a batch of prompts.
 
@@ -270,19 +284,34 @@ class TTSLLM(TTSScheduler):
             speaking_rate_buckets = speaking_rate_bucket
         else:
             speaking_rate_buckets = [speaking_rate_bucket] * len(prompts)
+        if isinstance(speaker_embedding, list):
+            speaker_embeddings = speaker_embedding
+        else:
+            speaker_embeddings = [speaker_embedding] * len(prompts)
+        if isinstance(clean_speaker_background, list):
+            clean_speaker_backgrounds = clean_speaker_background
+        else:
+            clean_speaker_backgrounds = [bool(clean_speaker_background)] * len(prompts)
+        if isinstance(accurate_mode, list):
+            accurate_modes = accurate_mode
+        else:
+            accurate_modes = [bool(accurate_mode)] * len(prompts)
 
         # Tokenize and queue all requests
-        for prompt, sp, rate_bucket in zip(
+        for prompt, sp, rate_bucket, spk_emb, clean_bg, accurate in zip(
             prompts,
             sampling_params,
             speaking_rate_buckets,
+            speaker_embeddings,
+            clean_speaker_backgrounds,
+            accurate_modes,
         ):
             input_ids = self._tokenize_one(
                 prompt,
                 speaking_rate_bucket=rate_bucket,
                 quality_buckets=quality_buckets,
             )
-            self.pending_requests.append((input_ids, sp))
+            self.pending_requests.append((input_ids, sp, spk_emb, bool(clean_bg), bool(accurate)))
 
         # Run generation
         try:
@@ -342,6 +371,9 @@ class TTSLLM(TTSScheduler):
         decode_audio: bool | None = None,
         speaking_rate_bucket: int | None = None,
         quality_buckets: Dict[str, int | None] | List[int | None] | None = None,
+        speaker_embedding: torch.Tensor | None = None,
+        clean_speaker_background: bool = False,
+        accurate_mode: bool = True,
     ) -> Dict:
         """Generate audio for a single prompt.
 
@@ -367,6 +399,9 @@ class TTSLLM(TTSScheduler):
             decode_audio=decode_audio,
             speaking_rate_bucket=speaking_rate_bucket,
             quality_buckets=quality_buckets,
+            speaker_embedding=speaker_embedding,
+            clean_speaker_background=clean_speaker_background,
+            accurate_mode=accurate_mode,
         )
         return results[0]
 

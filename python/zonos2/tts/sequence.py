@@ -76,11 +76,15 @@ class TTSSequence:
     def _check_eos(self, token: List[int]) -> None:
         """Check if EOS is detected in the delayed audio codebooks."""
         if self.eos_frame is None:
-            eos_cols = [token[i] == self.eoa_id for i in range(self.n_codebooks)]
-            if any(eos_cols):
-                step = self.num_completion_tokens - 1
-                max_eos_cb = max(i for i, is_eos in enumerate(eos_cols) if is_eos)
-                self.eos_frame = max(0, step - max_eos_cb)
+            step = self.num_completion_tokens - 1
+            min_tokens = max(0, int(getattr(self.sampling_params, "min_tokens", 0)))
+            eos_frames = [
+                step - i
+                for i in range(self.n_codebooks)
+                if token[i] == self.eoa_id and step - i >= min_tokens
+            ]
+            if eos_frames:
+                self.eos_frame = min(eos_frames)
                 self.eos_countdown = self.n_codebooks + 1
 
         if self.eos_frame is not None and self.eos_countdown > 0:

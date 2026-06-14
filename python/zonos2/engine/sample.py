@@ -29,6 +29,8 @@ class TTSBatchSamplingArgs:
     top_ks: torch.Tensor
     top_ps: torch.Tensor
     min_ps: torch.Tensor
+    min_tokens: torch.Tensor
+    generation_steps: torch.Tensor
     text_vocab: int
     repetition_token_ids: torch.Tensor | None = None
     repetition_penalties: torch.Tensor | None = None
@@ -63,6 +65,8 @@ class TTSSampler:
         top_ks = [p.topk if p.topk >= 1 else self.codebook_size for p in params]
         top_ps = [min(max(p.top_p, 0.0), 1.0) for p in params]
         min_ps = [max(p.min_p, 0.0) for p in params]
+        min_tokens = [max(int(getattr(p, "min_tokens", 0)), 0) for p in params]
+        generation_steps = [max(int(r.total_generated), 0) for r in batch.reqs]
         repetition_windows = [max(int(p.repetition_window), 0) for p in params]
         repetition_penalties = [max(float(p.repetition_penalty), 1.0) for p in params]
         repetition_codebooks = [
@@ -124,6 +128,8 @@ class TTSSampler:
             top_ks=make_device_tensor(top_ks, torch.int32, self.device),
             top_ps=make_device_tensor(top_ps, torch.float32, self.device),
             min_ps=make_device_tensor(min_ps, torch.float32, self.device),
+            min_tokens=make_device_tensor(min_tokens, torch.int32, self.device),
+            generation_steps=make_device_tensor(generation_steps, torch.int32, self.device),
             text_vocab=self.text_vocab,
             repetition_token_ids=repetition_token_ids,
             repetition_penalties=repetition_penalties_tensor,
@@ -148,6 +154,8 @@ class TTSSampler:
             top_ks=args.top_ks,
             top_ps=args.top_ps,
             min_ps=args.min_ps,
+            min_tokens=args.min_tokens,
+            generation_steps=args.generation_steps,
             repetition_token_ids=args.repetition_token_ids,
             repetition_penalties=args.repetition_penalties,
             text_vocab=args.text_vocab,

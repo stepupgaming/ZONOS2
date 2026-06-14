@@ -1,29 +1,41 @@
 from typing import Tuple
 
 import torch
+import torch.nn.functional as F
 
 from .base import BaseOP
+
+# Try to import flashinfer; fall back to PyTorch on Windows.
+try:
+    from flashinfer import rmsnorm as _rmsnorm_fn
+    from flashinfer import fused_add_rmsnorm as _fused_add_rmsnorm_fn
+    _FLASHINFER_AVAILABLE = True
+except ImportError:
+    _rmsnorm_fn = None
+    _fused_add_rmsnorm_fn = None
+    _FLASHINFER_AVAILABLE = False
 
 
 class RMSNorm(BaseOP):
     def __init__(self, size: int, eps: float) -> None:
-        from flashinfer import rmsnorm
-
         self.eps = eps
         self.weight = torch.empty(size)
-        self.rmsnorm = rmsnorm
+        self._rmsnorm_fn = _rmsnorm_fn
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.rmsnorm(x, self.weight, self.eps)
+        if self._rmsnorm_fn is not None:
+            return self._rmsnorm_fn(x, self.weight, self.eps)
+        return F.rms_norm(x, (self.weight.numel(),), self.weight, self.eps)
 
     def forward_inplace(self, x: torch.Tensor) -> None:
-        self.rmsnorm(x, self.weight, self.eps, out=x)
+        if self._rmsnorm_fn is not None:
+            self._rmsnorm_fn(x, self.weight, self.eps, out=x)
+        else:
+            x.copy_(F.rms_norm(x, (self.weight.numel(),), self.weight, self.eps))
 
 
 class RMSNormFused(BaseOP):
     def __init__(self, size: int, eps: float, elementwise_affine: bool = True) -> None:
-        from flashinfer import fused_add_rmsnorm, rmsnorm
-
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         self._size = size
@@ -33,8 +45,8 @@ class RMSNormFused(BaseOP):
         # When elementwise_affine=False, we use a ones buffer created lazily
         # to ensure correct device/dtype
 
-        self.rmsnorm = rmsnorm
-        self.fused_add_rmsnorm = fused_add_rmsnorm
+        self._rmsnorm_fn = _rmsnorm_fn
+        self._fused_add_rmsnorm_fn = _fused_add_rmsnorm_fn
         self._ones_buffer: torch.Tensor | None = None
 
     def _get_weight(self, x: torch.Tensor) -> torch.Tensor:
@@ -50,6 +62,11 @@ class RMSNormFused(BaseOP):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         weight = self._get_weight(x)
         if residual is None:
-            return self.rmsnorm(x, weight, self.eps), x
-        self.fused_add_rmsnorm(x, residual, weight, self.eps)
-        return x, residual
+            if self._rmsnorm_fn is not None:
+                return self._rmsnorm_fn(x, weight, self.eps), x
+            return F.rms_norm(x, (weight.numel(),), weight, self.eps), x
+        if self._fused_add_rmsnorm_fn is not None:
+            self._fused_add_rmsnorm_fn(x, residual, weight, self.eps)
+            return x, residual
+        residual.add_(x)
+        return F.rms_norm(residual, (weight.numel(),), weight, self.eps), residual

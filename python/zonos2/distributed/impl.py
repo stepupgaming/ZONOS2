@@ -24,6 +24,8 @@ class DistributedImpl(ABC):
 @dataclass
 class TorchDistributedImpl(DistributedImpl):
     def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        if not dist.is_available() or not dist.is_initialized():
+            return x
         tp_size = dist.get_world_size()
         if tp_size == 1:
             return x
@@ -31,6 +33,8 @@ class TorchDistributedImpl(DistributedImpl):
         return x
 
     def all_gather(self, x: torch.Tensor) -> torch.Tensor:
+        if not dist.is_available() or not dist.is_initialized():
+            return x
         tp_size = dist.get_world_size()
         if tp_size == 1:
             return x

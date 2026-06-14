@@ -15,12 +15,21 @@ from zonos2.utils.logger import init_logger
 from .base import BaseAttnBackend, BaseAttnMetadata
 from .utils import BaseCaptureData, make_positions
 
-if TYPE_CHECKING:
+# FlashInfer is Linux-only; provide placeholders for Windows.
+try:
     from flashinfer import (
         BatchDecodeWithPagedKVCacheWrapper,
         BatchPrefillWithPagedKVCacheWrapper,
         CUDAGraphBatchDecodeWithPagedKVCacheWrapper,
     )
+    _FLASHINFER_AVAILABLE = True
+except ImportError:
+    BatchDecodeWithPagedKVCacheWrapper = None
+    BatchPrefillWithPagedKVCacheWrapper = None
+    CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
+    _FLASHINFER_AVAILABLE = False
+
+if TYPE_CHECKING:
     from zonos2.core import TTSBatch
     from zonos2.kvcache import BaseKVCache
     from zonos2.models import ModelConfig

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
+import sys
 from typing import TYPE_CHECKING, List
 
 import torch
@@ -18,15 +19,16 @@ class EngineConfig:
     tp_info: DistributedInfo
     dtype: torch.dtype
     max_running_req: int = 256
-    attention_backend: str = "auto"
+    attention_backend: str = "torch" if sys.platform == "win32" else "auto"
     moe_backend: str = "fused_moe"
     cuda_graph_bs: List[int] | None = None
     cuda_graph_max_bs: int | None = None
+    disable_cuda_graphs: bool = sys.platform == "win32"
     page_size: int = 1
     memory_ratio: float = 0.9
     distributed_timeout: float = 60.0
     use_dummy_weight: bool = False
-    use_pynccl: bool = True
+    use_pynccl: bool = sys.platform != "win32"
     max_seq_len_override: int | None = None
     num_page_override: int | None = None  # if not None, will override the number of pages
 

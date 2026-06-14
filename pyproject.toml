@@ -7,7 +7,7 @@ name = "ZONOS2"
 version = "0.1.0"
 description = "Inference code for the ZONOS2 TTS model"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = {text = "MIT"}
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -22,28 +22,31 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
+    "numpy",
     "msgpack",
-    "sgl_kernel>=0.3.17.post1",
-    "torch",
-    "torchaudio==2.9.1",
+    "sgl_kernel>=0.3.17.post1; sys_platform != 'win32'",
+    "triton-windows>=3.7.0; sys_platform == 'win32'",
+    "torch==2.9.1+cu128",
+    "torchaudio==2.9.1+cu128",
+    "torchcodec",
     "descript-audio-codec==1.0.0",
     "transformers>=4.56.0,<=4.57.3",
     "huggingface_hub",
     "pyzmq",
     "uvicorn",
     "fastapi",
-    "apache-tvm-ffi>=0.1.4",
-    "nvidia-cutlass-dsl==4.3.1",
-    "flashinfer-cubin==0.5.3",
-    "flashinfer-python>=0.5.3",
-    "flashinfer-jit-cache",
-    "ninja>=1.13.0",
-    "kernels>=0.12.1",
+    "apache-tvm-ffi>=0.1.4; sys_platform != 'win32'",
+    "nvidia-cutlass-dsl==4.3.1; sys_platform != 'win32'",
+    "flashinfer-cubin==0.5.3; sys_platform != 'win32'",
+    "flashinfer-python>=0.5.3; sys_platform != 'win32'",
+    "flashinfer-jit-cache; sys_platform != 'win32'",
+    "ninja>=1.13.0; sys_platform != 'win32'",
+    "kernels>=0.12.1; sys_platform != 'win32'",
     # Vendored NeMo TTS text normalization (python/zonos2/vendor):
     # pynini matches WeTextProcessing's pin; sacremoses pulls regex/joblib/tqdm.
     # NOTE: the pt grammar miscompiles under pynini 2.1.5.
-    "pynini==2.1.6",
-    "sacremoses>=0.1.1",
+    "pynini==2.1.6; sys_platform != 'win32'",
+    "sacremoses>=0.1.1; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -149,4 +152,11 @@ module = [
 ignore_missing_imports = true
 
 [tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
 flashinfer-jit-cache = { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.5.3/flashinfer_jit_cache-0.5.3+cu128-cp39-abi3-manylinux_2_28_x86_64.whl" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
